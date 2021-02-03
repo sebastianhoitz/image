@@ -1,0 +1,281 @@
+<template>
+  <div class="wrapper__responsive">
+    <div class="sizer__responsive" :style="{ paddingTop: sizerHeight }" />
+    <img
+      v-if="placeholder"
+      aria-hidden="true"
+      class="placeholder"
+      :src="placeholderSrc"
+      :style="{ opacity: isLoaded ? 0 : 1 }"
+    >
+    <picture v-if="isVisible">
+      <source v-if="sources[1]" v-bind="sources[1]">
+      <img
+        v-if="isVisible"
+        class="img"
+        decoding="async"
+        :alt="nAlt"
+        :referrerpolicy="referrerpolicy"
+        :usemap="usemap"
+        :longdesc="longdesc"
+        :ismap="ismap"
+        :crossorigin="crossorigin"
+        :src="defaultSrc"
+        :srcset="sources[0].srcset"
+        :style="{ opacity: isLoaded ? 1 : 0.01 }"
+        :sizes="sources[0].sizes"
+        :loading="isLazy ? 'lazy' : 'eager'"
+        @load="onImageLoaded"
+        @onbeforeprint="onPrint"
+      >
+    </picture>
+  </div>
+</template>
+
+<script>
+import {generateAlt, getFileExtension, useObserver, parseSize} from "~image";
+export const LazyState = {
+  IDLE: "idle",
+  LOADING: "loading",
+  LOADED: "loaded"
+};
+export default {
+  name: "NuxtPicture",
+  props: {
+    src: {type: String, required: true},
+    width: {type: [String, Number], required: false, default: void 0},
+    height: {type: [String, Number], required: false, default: void 0},
+    alt: {type: String, required: false, default: void 0},
+    referrerpolicy: {type: String, default: void 0},
+    usemap: {type: String, default: void 0},
+    longdesc: {type: String, default: void 0},
+    ismap: {type: Boolean, default: false},
+    crossorigin: {type: Boolean, default: false},
+    loading: {type: String, default: "lazy"},
+    format: {type: String, required: false, default: void 0},
+    legacyFormat: {type: String, required: false, default: void 0},
+    quality: {type: [Number, String], required: false, default: void 0},
+    background: {type: String, required: false, default: void 0},
+    fit: {type: String, required: false, default: void 0},
+    modifiers: {type: Object, required: false, default: void 0},
+    preset: {type: String, required: false, default: void 0},
+    provider: {type: String, required: false, default: void 0},
+    placeholder: {type: [Boolean, String], default: false},
+    sizes: {type: [Array], default: void 0}
+  },
+  data() {
+    const isLazy = this.loading === "lazy";
+    return {
+      isLazy,
+      lazyState: isLazy ? LazyState.IDLE : LazyState.LOADED
+    };
+  },
+  computed: {
+    ratio() {
+      return this.nHeight / this.nWidth;
+    },
+    isVisible() {
+      if (this.lazyState === LazyState.IDLE) {
+        return false;
+      }
+      return true;
+    },
+    isLoaded() {
+      return this.lazyState === LazyState.LOADED;
+    },
+    nAlt() {
+      return this.alt ?? generateAlt(this.src);
+    },
+    nWidth() {
+      return parseSize(this.width);
+    },
+    nHeight() {
+      return parseSize(this.height);
+    },
+    isTransparent() {
+      return ["png", "webp", "gif"].includes(this.originalFormat);
+    },
+    originalFormat() {
+      return getFileExtension(this.src);
+    },
+    nFormat() {
+      if (this.format) {
+        return this.format;
+      }
+      if (this.originalFormat === "svg") {
+        return "svg";
+      }
+      return "webp";
+    },
+    nLegacyFormat() {
+      if (this.legacyFormat) {
+        return this.legacyFormat;
+      }
+      const formats = {
+        webp: this.isTransparent ? "png" : "jpeg",
+        svg: "png"
+      };
+      return formats[this.nFormat] || this.originalFormat;
+    },
+    nModifiers() {
+      return {
+        ...this.modifiers,
+        format: this.format,
+        quality: this.quality,
+        background: this.background,
+        fit: this.fit
+      };
+    },
+    nOptions() {
+      return {
+        provider: this.provider,
+        preset: this.preset
+      };
+    },
+    defaultSrc() {
+      return this.sources[0].srcset[0].split(" ")[0];
+    },
+    sources() {
+      return this.getSources();
+    },
+    srcset() {
+      if (this.nFormat === "svg") {
+        return;
+      }
+      return this.sources.map((source) => `${source.srcset} ${source.width}w`);
+    },
+    placeholderSrc() {
+      if (!this.placeholder) {
+        return;
+      }
+      if (typeof this.placeholder === "string") {
+        return this.placeholder;
+      }
+      const width = 30;
+      return this.$img(this.src, {
+        ...this.nModifiers,
+        width,
+        height: this.ratio ? Math.round(width * this.ratio) : void 0
+      }, this.nOptions);
+    },
+    sizerHeight() {
+      return this.ratio ? `${this.ratio * 100}%` : "100%";
+    }
+  },
+  created() {
+    if (process.server && process.static) {
+      this.getSources();
+    }
+  },
+  mounted() {
+    if (this.isLazy) {
+      this.observe();
+    }
+  },
+  beforeDestroy() {
+    this.unobserve();
+  },
+  methods: {
+    getSources() {
+      if (this.nFormat === "svg") {
+        return [{
+          srcset: this.src
+        }];
+      }
+      const formats = this.nLegacyFormat !== this.nFormat ? [this.nLegacyFormat, this.nFormat] : [this.nFormat];
+      const sources = formats.map((format) => {
+        const sizes = this.$img.getSizes(this.src, {
+          ...this.nOptions,
+          modifiers: {
+            ...this.nModifiers,
+            width: this.nWidth,
+            height: this.nHeight,
+            format
+          }
+        }, this.sizes);
+        return {
+          type: `image/${format}`,
+          sizes: sizes.map(({width}) => `(max-width: ${width}px) ${width}px`),
+          srcset: sizes.map(({width, src}) => `${src} ${width}w`)
+        };
+      });
+      return sources;
+    },
+    observe() {
+      this._removeObserver = useObserver(this.$el, (type) => this.onObservered(type));
+    },
+    unobserve() {
+      if (this._removeObserver) {
+        this._removeObserver();
+        delete this._removeObserver;
+      }
+    },
+    onImageLoaded(event) {
+      this.$emit("load", event);
+      if (this.lazyState !== LazyState.LOADED) {
+        this.lazyState = LazyState.LOADED;
+      }
+    },
+    onObservered(type) {
+      if (type === "print") {
+        return this.onPrint();
+      }
+      this.lazyState = LazyState.LOADING;
+    },
+    onPrint() {
+      this.lazyState = LazyState.LOADED;
+      this.unobserve();
+    }
+  }
+};
+</script>
+
+<style scoped>
+.img {
+  position: absolute;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  right: 0;
+  width: 0px;
+  height: 0px;
+  box-sizing: border-box;
+  border: none;
+  margin: auto;
+  inset: 0px;
+  display: block;
+  padding: 0;
+  min-width: 100%;
+  max-width: 100%;
+  min-height: 100%;
+  max-height: 100%;
+  transition: opacity 500ms ease 0s;
+  object-fit: cover;
+  object-position: center center;
+}
+.placeholder {
+  position: absolute;
+  left: 0;
+  top: 0;
+  margin: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center center;
+  filter: blur(10px);
+  transition-delay: 500ms;
+}
+
+.wrapper__responsive {
+  display: block;
+  overflow: hidden;
+  position: relative;
+  box-sizing: border-box;
+  margin: 0;
+}
+
+.sizer__responsive {
+  display: block;
+  box-sizing: border-box;
+}
+</style>
